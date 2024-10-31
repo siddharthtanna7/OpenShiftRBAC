@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"sort"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v2"
 	"k8s.io/client-go/kubernetes"
@@ -51,6 +54,17 @@ type Violation struct {
 	Identity Identity
 	Rule     string
 	Scope    string
+	Impact   string
+}
+
+// Add this struct to consolidate violations
+type ConsolidatedViolation struct {
+    Identity    string
+    Type        string
+    Namespace   string
+    Scope       string
+    Violations  []string
+    Impact      map[string]string
 }
 
 // Add this function to detect cluster type
@@ -253,6 +267,7 @@ func CheckIdentityPermissions(config *PermissionsConfig, identity Identity) []Vi
 				Identity: identity,
 				Rule:     sensitivePermission.Name,
 				Scope:    identity.Scope,
+				Impact:   sensitivePermission.Impact,
 			})
 		}
 	}
@@ -308,48 +323,114 @@ func hasOverlap(a, b []string) bool {
 }
 
 func OutputViolations(violations []Violation) {
-	// Group violations by identity type
-	userViolations := make(map[string][]Violation)
-	saViolations := make(map[string][]Violation)
-	groupViolations := make(map[string][]Violation)
+	// Map to store consolidated violations
+	consolidated := make(map[string]*ConsolidatedViolation)
 	
+	// Consolidate violations by identity
 	for _, v := range violations {
-		switch v.Identity.Type {
-		case "user":
-			userViolations[v.Identity.Name] = append(userViolations[v.Identity.Name], v)
-		case "serviceAccount":
-			saViolations[v.Identity.Name] = append(saViolations[v.Identity.Name], v)
-		case "group":
-			groupViolations[v.Identity.Name] = append(groupViolations[v.Identity.Name], v)
+		key := v.Identity.Name
+		if _, exists := consolidated[key]; !exists {
+			consolidated[key] = &ConsolidatedViolation{
+				Identity:   v.Identity.Name,
+				Type:      v.Identity.Type,
+				Namespace: v.Identity.Namespace,
+				Scope:     v.Identity.Scope,
+				Violations: []string{},
+					Impact:    make(map[string]string),
+			}
+		}
+		consolidated[key].Violations = append(consolidated[key].Violations, v.Rule)
+		consolidated[key].Impact[v.Rule] = v.Impact
+	}
+
+	// Output formatted report
+	fmt.Println("\n=== Security Policy Violation Report ===")
+	fmt.Printf("Generated: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+	fmt.Println("=======================================\n")
+
+	// Group by identity type
+	printIdentityViolations("Service Accounts", consolidated, "serviceAccount")
+	printIdentityViolations("Users", consolidated, "user")
+	printIdentityViolations("Groups", consolidated, "group")
+	
+	// Print summary
+	printSummary(consolidated)
+}
+
+func printIdentityViolations(title string, consolidated map[string]*ConsolidatedViolation, identityType string) {
+	fmt.Printf("\n%s\n%s\n", title, strings.Repeat("-", len(title)))
+	
+	found := false
+	for identity, cv := range consolidated {
+		if cv.Type != identityType {
+			continue
+		}
+		found = true
+		
+		fmt.Printf("\n🔴 Identity: %s\n", identity)
+		if cv.Namespace != "" {
+			fmt.Printf("   Namespace: %s\n", cv.Namespace)
+		}
+		fmt.Printf("   Scope: %s\n", cv.Scope)
+		
+		fmt.Println("   Policy Violations:")
+		for i, violation := range cv.Violations {
+			fmt.Printf("   %d. %s\n", i+1, violation)
+			fmt.Printf("      Impact: %s\n", cv.Impact[violation])
+		}
+		
+		fmt.Printf("   Total Violations: %d\n", len(cv.Violations))
+	}
+	
+	if !found {
+		fmt.Println("No violations found.")
+	}
+}
+
+func printSummary(consolidated map[string]*ConsolidatedViolation) {
+	fmt.Println("\n=== Summary ===")
+	
+	// Count violations by type
+	var totalViolations, totalIdentities int
+	typeCount := make(map[string]int)
+	violationCount := make(map[string]int)
+	
+	for _, cv := range consolidated {
+		totalIdentities++
+		typeCount[cv.Type]++
+		totalViolations += len(cv.Violations)
+		
+		for _, v := range cv.Violations {
+			violationCount[v]++
 		}
 	}
 	
-	// Output formatted results
-	fmt.Println("\nUsers")
-	fmt.Println("-------")
-	outputViolationGroup(userViolations)
+	// Print statistics
+	fmt.Printf("\nViolation Statistics:\n")
+	fmt.Printf("Total Identities with Violations: %d\n", totalIdentities)
+	fmt.Printf("Total Policy Violations: %d\n\n", totalViolations)
 	
-	fmt.Println("\nServiceAccounts")
-	fmt.Println("-------------------")
-	outputViolationGroup(saViolations)
+	fmt.Println("Violations by Identity Type:")
+	for iType, count := range typeCount {
+		fmt.Printf("- %s: %d\n", iType, count)
+	}
 	
-	fmt.Println("\nGroups")
-	fmt.Println("-----------")
-	outputViolationGroup(groupViolations)
-}
-
-func outputViolationGroup(violations map[string][]Violation) {
-	for identity, vs := range violations {
-		for _, v := range vs {
-			fmt.Printf("- Rule: %q\n", v.Rule)
-			fmt.Printf("    a) Identity: %s\n", identity)
-			if v.Identity.Namespace != "" {
-				fmt.Printf("    b) Scope: Namespace: %s\n", v.Identity.Namespace)
-			} else {
-				fmt.Printf("    b) Scope: Cluster-wide\n")
-			}
-			fmt.Println()
-		}
+	fmt.Println("\nMost Common Policy Violations:")
+	// Sort violations by frequency
+	type violationFreq struct {
+		name  string
+		count int
+	}
+	var sorted []violationFreq
+	for name, count := range violationCount {
+		sorted = append(sorted, violationFreq{name, count})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].count > sorted[j].count
+	})
+	
+	for _, v := range sorted {
+		fmt.Printf("- %s: %d occurrences\n", v.name, v.count)
 	}
 }
 
