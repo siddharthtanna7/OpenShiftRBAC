@@ -1,0 +1,111 @@
+sensitivePermissions:
+  # Cluster-wide Administrative Access
+  - name: "Cluster Admin Access"
+    resources: ["*"]
+    verbs: ["*"]
+    impact: "Complete cluster control"
+    apiGroups: ["*"]
+    exceptions:
+      users: ["system:admin", "system:masters"]
+      serviceAccounts: ["openshift-cluster-version:default"]
+      groups: ["system:masters"]
+
+  # Secrets Management
+  - name: "Secrets Access"
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    impact: "Can access sensitive data including credentials"
+    apiGroups: [""]
+    exceptions:
+      serviceAccounts: ["openshift-monitoring:prometheus-k8s"]
+
+  # Security Context Constraints
+  - name: "SCC Management"
+    resources: ["securitycontextconstraints"]
+    verbs: ["update", "create", "delete"]
+    impact: "Can modify security policies affecting pod security"
+    apiGroups: ["security.openshift.io"]
+    exceptions:
+      users: ["system:admin"]
+      groups: ["system:masters"]
+
+  # OAuth and Identity Management
+  - name: "Identity Management"
+    resources: ["users", "groups", "identities", "oauthclients"]
+    verbs: ["create", "delete", "update"]
+    impact: "Can modify authentication and user access"
+    apiGroups: ["user.openshift.io", "oauth.openshift.io"]
+    exceptions:
+      serviceAccounts: ["openshift-authentication-operator:authentication-operator"]
+
+  # Node Management
+  - name: "Node Control"
+    resources: ["nodes"]
+    verbs: ["create", "delete", "update", "patch"]
+    impact: "Can modify cluster infrastructure"
+    apiGroups: [""]
+    exceptions:
+      serviceAccounts: ["openshift-machine-config-operator:machine-config-controller"]
+
+  # Project/Namespace Control
+  - name: "Project Management"
+    resources: ["projects", "namespaces"]
+    verbs: ["create", "delete"]
+    impact: "Can create and delete isolated environments"
+    apiGroups: [""]
+    exceptions:
+      serviceAccounts: ["openshift-infra:namespace-controller"]
+
+  # Storage Management
+  - name: "Storage Control"
+    resources: ["persistentvolumes", "storageclasses"]
+    verbs: ["create", "delete", "update"]
+    impact: "Can modify cluster storage configuration"
+    apiGroups: ["storage.k8s.io"]
+    exceptions:
+      serviceAccounts: ["openshift-cluster-storage-operator:storage-operator"]
+
+  # Network Policy
+  - name: "Network Policy Control"
+    resources: ["networkpolicies", "egressfirewalls"]
+    verbs: ["create", "update", "delete"]
+    impact: "Can modify network security policies"
+    apiGroups: ["networking.k8s.io", "k8s.ovn.org"]
+    exceptions:
+      serviceAccounts: ["openshift-network-operator:network-operator"]
+
+  # Operator Management
+  - name: "Operator Lifecycle"
+    resources: ["operators", "clusterserviceversions", "subscriptions"]
+    verbs: ["create", "delete", "update"]
+    impact: "Can modify cluster operators and services"
+    apiGroups: ["operators.coreos.com"]
+    exceptions:
+      serviceAccounts: ["openshift-operator-lifecycle-manager:olm-operator"]
+
+  # Monitoring Stack
+  - name: "Monitoring Configuration"
+    resources: ["prometheuses", "alertmanagers", "servicemonitors"]
+    verbs: ["create", "update", "delete"]
+    impact: "Can modify cluster monitoring"
+    apiGroups: ["monitoring.coreos.com"]
+    exceptions:
+      serviceAccounts: ["openshift-monitoring:cluster-monitoring-operator"]
+
+  # Machine Management
+  - name: "Machine Control"
+    resources: ["machines", "machinesets", "machinehealthchecks"]
+    verbs: ["create", "delete", "update"]
+    impact: "Can modify cluster node infrastructure"
+    apiGroups: ["machine.openshift.io"]
+    exceptions:
+      serviceAccounts: ["openshift-machine-api:machine-api-operator"]
+
+  # Image Registry
+  - name: "Registry Management"
+    resources: ["imagestreams", "imagestreamtags"]
+    verbs: ["create", "delete", "update"]
+    impact: "Can modify container image sources"
+    apiGroups: ["image.openshift.io"]
+    exceptions:
+      serviceAccounts: ["openshift-image-registry:registry"]
