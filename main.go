@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"flag"
 
 	"gopkg.in/yaml.v2"
 	"k8s.io/client-go/kubernetes"
@@ -67,6 +68,22 @@ type ConsolidatedViolation struct {
     Impact      map[string]string
 }
 
+// Add these global variables
+var (
+	checkUsers          bool
+	checkGroups         bool
+	checkServiceAccounts bool
+	checkAll            bool
+)
+
+func init() {
+	// Define flags
+	flag.BoolVar(&checkUsers, "users", false, "Check user identities")
+	flag.BoolVar(&checkGroups, "groups", false, "Check group identities")
+	flag.BoolVar(&checkServiceAccounts, "sa", false, "Check service account identities")
+	flag.BoolVar(&checkAll, "all", false, "Check all identity types")
+}
+
 // Add this function to detect cluster type
 func isOpenShiftCluster(clientset *kubernetes.Clientset) bool {
 	_, err := clientset.RESTClient().Get().AbsPath("/apis/user.openshift.io").DoRaw(context.Background())
@@ -74,6 +91,14 @@ func isOpenShiftCluster(clientset *kubernetes.Clientset) bool {
 }
 
 func main() {
+	// Parse flags
+	flag.Parse()
+
+	// If no specific type is selected, default to all
+	if !checkUsers && !checkGroups && !checkServiceAccounts && !checkAll {
+		checkAll = true
+	}
+
 	// Load configuration
 	config, err := LoadConfig("permissions-config.yaml")
 	if err != nil {
@@ -105,9 +130,17 @@ func main() {
 		log.Fatalf("Failed to get cluster identities: %v", err)
 	}
 
+	// Filter identities based on flags
+	var filteredIdentities []Identity
+	for _, identity := range identities {
+		if shouldIncludeIdentity(identity) {
+			filteredIdentities = append(filteredIdentities, identity)
+		}
+	}
+
 	// Check permissions and collect violations
 	var violations []Violation
-	for _, identity := range identities {
+	for _, identity := range filteredIdentities {
 		identityViolations := CheckIdentityPermissions(config, identity)
 		violations = append(violations, identityViolations...)
 	}
@@ -494,4 +527,22 @@ func isIdentityInBinding(identity Identity, subjects []rbacv1.Subject) bool {
 		}
 	}
 	return false
+}
+
+// Add this helper function
+func shouldIncludeIdentity(identity Identity) bool {
+	if checkAll {
+		return true
+	}
+
+	switch identity.Type {
+	case "user":
+		return checkUsers
+	case "group":
+		return checkGroups
+	case "serviceAccount":
+		return checkServiceAccounts
+	default:
+		return false
+	}
 }
