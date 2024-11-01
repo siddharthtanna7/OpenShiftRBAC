@@ -8,6 +8,7 @@ import (
 	"time"
 	"flag"
 	"sync"
+	"strings"
 
 	"gopkg.in/yaml.v2"
 	"k8s.io/client-go/kubernetes"
@@ -53,20 +54,19 @@ type IdentityPermission struct {
 }
 
 type Violation struct {
-	Identity Identity
-	Rule     string
-	Scope    string
-	Impact   string
+	Identity    Identity
+	Rule        string
+	Impact      string
+	Scope       string
 }
 
 // Add this struct to consolidate violations
 type ConsolidatedViolation struct {
     Identity    string
-    Type        string
-    Namespace   string
-    Scope       string
+    Type        string   // "user", "group", or "serviceAccount"
+    Namespace   string   // for serviceAccounts
     Violations  []string
-    Impact      map[string]string  // maps violation name to impact
+    Impacts     map[string]string  // maps violation name to impact
 }
 
 // Add these global variables
@@ -545,8 +545,8 @@ func CheckIdentityPermissions(config *PermissionsConfig, identity Identity) []Vi
 			violations = append(violations, Violation{
 				Identity: identity,
 				Rule:     sensitivePermission.Name,
-				Scope:    identity.Scope,
 				Impact:   sensitivePermission.Impact,
+				Scope:    identity.Scope,
 			})
 		}
 	}
@@ -603,153 +603,88 @@ func hasOverlap(a, b []string) bool {
 }
 
 func OutputViolations(violations []Violation) {
-	// Maps to store consolidated violations
-	clusterViolations := make(map[string]map[string]map[string]*ConsolidatedViolation)  // violation -> type -> name -> ConsolidatedViolation
-	namespaceViolations := make(map[string]map[string]map[string]*ConsolidatedViolation)  // namespace -> type -> name -> ConsolidatedViolation
+	// Map to store consolidated violations by identity
+	consolidatedViolations := make(map[string]*ConsolidatedViolation)
 
-	// Organize violations
+	// Consolidate violations by identity
 	for _, v := range violations {
-		if v.Scope == "cluster-wide" {
-			if _, exists := clusterViolations[v.Rule]; !exists {
-				clusterViolations[v.Rule] = make(map[string]map[string]*ConsolidatedViolation)
-			}
-			if _, exists := clusterViolations[v.Rule][v.Identity.Type]; !exists {
-				clusterViolations[v.Rule][v.Identity.Type] = make(map[string]*ConsolidatedViolation)
-			}
-			
-			if cv, exists := clusterViolations[v.Rule][v.Identity.Type][v.Identity.Name]; exists {
-				cv.Violations = append(cv.Violations, v.Rule)
-				cv.Impact[v.Rule] = v.Impact
-			} else {
-				clusterViolations[v.Rule][v.Identity.Type][v.Identity.Name] = &ConsolidatedViolation{
-					Identity:   v.Identity.Name,
-					Type:      v.Identity.Type,
-					Scope:     v.Scope,
-					Violations: []string{v.Rule},
-					Impact:    map[string]string{v.Rule: v.Impact},
-				}
-			}
+		// Create key based on identity type
+		var key string
+		if v.Identity.Type == "serviceAccount" {
+			key = fmt.Sprintf("%s:%s", v.Identity.Namespace, v.Identity.Name)
 		} else {
-			if _, exists := namespaceViolations[v.Identity.Namespace]; !exists {
-				namespaceViolations[v.Identity.Namespace] = make(map[string]map[string]*ConsolidatedViolation)
+			key = v.Identity.Name
+		}
+
+		if _, exists := consolidatedViolations[key]; !exists {
+			consolidatedViolations[key] = &ConsolidatedViolation{
+				Identity:   v.Identity.Name,
+				Type:      v.Identity.Type,
+				Namespace: v.Identity.Namespace,
+				Violations: make([]string, 0),
+				Impacts:   make(map[string]string),
 			}
-			if _, exists := namespaceViolations[v.Identity.Namespace][v.Identity.Type]; !exists {
-				namespaceViolations[v.Identity.Namespace][v.Identity.Type] = make(map[string]*ConsolidatedViolation)
-			}
-			
-			if cv, exists := namespaceViolations[v.Identity.Namespace][v.Identity.Type][v.Identity.Name]; exists {
-				cv.Violations = append(cv.Violations, v.Rule)
-				cv.Impact[v.Rule] = v.Impact
-			} else {
-				namespaceViolations[v.Identity.Namespace][v.Identity.Type][v.Identity.Name] = &ConsolidatedViolation{
-					Identity:   v.Identity.Name,
-					Type:      v.Identity.Type,
-					Namespace: v.Identity.Namespace,
-					Scope:     v.Scope,
-					Violations: []string{v.Rule},
-					Impact:    map[string]string{v.Rule: v.Impact},
-				}
-			}
+		}
+
+		// Add violation if not already present
+		if !contains(consolidatedViolations[key].Violations, v.Rule) {
+			consolidatedViolations[key].Violations = append(consolidatedViolations[key].Violations, v.Rule)
+			consolidatedViolations[key].Impacts[v.Rule] = v.Impact
 		}
 	}
 
-	// Print report header
-	fmt.Println("\n=== Security Policy Violation Report ===")
-	fmt.Printf("Generated: %s\n", time.Now().Format("2006-01-02 15:04:05"))
-	fmt.Println("=======================================")
-
-	// Print Cluster-Wide Violations
-	fmt.Println("\n🌐 Cluster-Wide Access Violations:")
-	fmt.Println("================================")
-	
-	if len(clusterViolations) == 0 {
-		fmt.Println("No cluster-wide violations found.")
-	} else {
-		for violationRule, typeMap := range clusterViolations {
-			fmt.Printf("\n⚠️  Violation: %s\n", violationRule)
-			
-			// Print Users
-			if users := typeMap["user"]; len(users) > 0 {
-				fmt.Println("  👤 Users:")
-				for _, cv := range users {
-					fmt.Printf("    - %s\n", cv.Identity)
-					fmt.Printf("      Impact: %s\n", cv.Impact[violationRule])
-				}
-			}
-			
-			// Print Groups
-			if groups := typeMap["group"]; len(groups) > 0 {
-				fmt.Println("  👥 Groups:")
-				for _, cv := range groups {
-					fmt.Printf("    - %s\n", cv.Identity)
-					fmt.Printf("      Impact: %s\n", cv.Impact[violationRule])
-				}
-			}
-			
-			// Print Service Accounts
-			if sas := typeMap["serviceAccount"]; len(sas) > 0 {
-				fmt.Println("  🔧 Service Accounts:")
-				for _, cv := range sas {
-					fmt.Printf("    - %s\n", cv.Identity)
-					fmt.Printf("      Impact: %s\n", cv.Impact[violationRule])
-				}
-			}
-		}
-	}
-
-	// Print Namespace-Scoped Violations
-	fmt.Println("\n📁 Namespace-Scoped Violations:")
+	// Print consolidated violations
+	fmt.Println("\n🔍 Security Violations Report")
 	fmt.Println("============================")
-	
-	if len(namespaceViolations) == 0 {
-		fmt.Println("No namespace-scoped violations found.")
-	} else {
-		for namespace, typeMap := range namespaceViolations {
-			fmt.Printf("\n📂 Namespace: %s\n", namespace)
-			
-			// Print Users
-			if users := typeMap["user"]; len(users) > 0 {
-				fmt.Println("  👤 Users:")
-				for _, cv := range users {
-					fmt.Printf("    - %s\n", cv.Identity)
-					fmt.Println("      Violations:")
-					for _, v := range cv.Violations {
-						fmt.Printf("        • %s\n", v)
-						fmt.Printf("          Impact: %s\n", cv.Impact[v])
-					}
+
+	// Print by identity type
+	printIdentityTypeViolations(consolidatedViolations, "user", "Users")
+	printIdentityTypeViolations(consolidatedViolations, "group", "Groups")
+	printIdentityTypeViolations(consolidatedViolations, "serviceAccount", "Service Accounts")
+}
+
+func printIdentityTypeViolations(violations map[string]*ConsolidatedViolation, identityType, header string) {
+	// Collect violations for this type
+	typeViolations := make([]*ConsolidatedViolation, 0)
+	for _, v := range violations {
+		if v.Type == identityType {
+			typeViolations = append(typeViolations, v)
+		}
+	}
+
+	// Only print section if there are violations
+	if len(typeViolations) > 0 {
+		fmt.Printf("\n📋 %s\n", header)
+		fmt.Println(strings.Repeat("-", len(header)+3))
+
+		for _, v := range typeViolations {
+			if len(v.Violations) > 0 {
+				switch identityType {
+				case "serviceAccount":
+					fmt.Printf("\n🔑 ServiceAccount: %s (Namespace: %s)\n", v.Identity, v.Namespace)
+				case "user":
+					fmt.Printf("\n👤 User: %s\n", v.Identity)
+				case "group":
+					fmt.Printf("\n👥 Group: %s\n", v.Identity)
 				}
-			}
-			
-			// Print Groups
-			if groups := typeMap["group"]; len(groups) > 0 {
-				fmt.Println("  👥 Groups:")
-				for _, cv := range groups {
-					fmt.Printf("    - %s\n", cv.Identity)
-					fmt.Println("      Violations:")
-					for _, v := range cv.Violations {
-						fmt.Printf("        • %s\n", v)
-						fmt.Printf("          Impact: %s\n", cv.Impact[v])
-					}
-				}
-			}
-			
-			// Print Service Accounts
-			if sas := typeMap["serviceAccount"]; len(sas) > 0 {
-				fmt.Println("  🔧 Service Accounts:")
-				for _, cv := range sas {
-					fmt.Printf("    - %s\n", cv.Identity)
-					fmt.Println("      Violations:")
-					for _, v := range cv.Violations {
-						fmt.Printf("        • %s\n", v)
-						fmt.Printf("          Impact: %s\n", cv.Impact[v])
-					}
+				
+				fmt.Println("Violations:")
+				for _, violation := range v.Violations {
+					fmt.Printf("  • %s\n", violation)
+					fmt.Printf("    Impact: %s\n", v.Impacts[violation])
 				}
 			}
 		}
 	}
+}
 
-	// Print Summary
-	printSummary(clusterViolations, namespaceViolations)
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }
 
 // Helper function to check if an identity is already in a slice
