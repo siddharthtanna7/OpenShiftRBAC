@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 	"flag"
+	"sync"
 
 	"gopkg.in/yaml.v2"
 	"k8s.io/client-go/kubernetes"
@@ -64,7 +65,7 @@ type ConsolidatedViolation struct {
     Namespace   string
     Scope       string
     Violations  []string
-    Impact      map[string]string
+    Impact      map[string]string  // maps violation name to impact
 }
 
 // Add these global variables
@@ -141,16 +142,53 @@ func main() {
 
 	fmt.Println("\n🔎 Analyzing permissions...")
 	
-	// Check permissions and collect violations
-	var violations []Violation
+	// Create a channel for collecting violations
+	violationsChan := make(chan []Violation, len(filteredIdentities))
+	var wg sync.WaitGroup
+	
+	// Create a semaphore to limit concurrent goroutines
+	semaphore := make(chan struct{}, 10) // Limit to 10 concurrent checks
+	
+	total := len(filteredIdentities)
+	progress := 0
+	mu := sync.Mutex{}
+	
+	updateProgress := func() {
+		mu.Lock()
+		progress++
+		fmt.Printf("\rAnalyzing permissions: %d/%d (%d%%)", progress, total, (progress*100)/total)
+		mu.Unlock()
+	}
+	
+	// Check permissions concurrently
 	for _, identity := range filteredIdentities {
-		identityViolations := CheckIdentityPermissions(config, identity)
-		violations = append(violations, identityViolations...)
+		wg.Add(1)
+		go func(id Identity) {
+			defer wg.Done()
+			defer updateProgress()
+			semaphore <- struct{}{} // Acquire semaphore
+			defer func() { <-semaphore }() // Release semaphore
+			
+			identityViolations := CheckIdentityPermissions(config, id)
+			if len(identityViolations) > 0 {
+				violationsChan <- identityViolations
+			}
+		}(identity)
+	}
+	
+	// Close violations channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(violationsChan)
+	}()
+	
+	// Collect violations
+	var violations []Violation
+	for v := range violationsChan {
+		violations = append(violations, v...)
 	}
 
 	fmt.Println("\n📊 Generating report...")
-	
-	// Output results
 	OutputViolations(violations)
 }
 
@@ -314,44 +352,137 @@ func GetClusterIdentities(k8sClient *kubernetes.Clientset, ocClient *openshiftcl
 
 func getIdentityPermissions(clientset *kubernetes.Clientset, identity Identity) ([]IdentityPermission, error) {
 	var permissions []IdentityPermission
+	ctx := context.Background()
 	
-	// Get role bindings for the identity
-	roleBindings, err := clientset.RbacV1().RoleBindings(identity.Namespace).List(context.Background(), metav1.ListOptions{})
+	// Get all role bindings and cluster role bindings in one request
+	roleBindings, err := clientset.RbacV1().RoleBindings("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("error listing role bindings: %v", err)
 	}
 	
-	// Get cluster role bindings
-	clusterRoleBindings, err := clientset.RbacV1().ClusterRoleBindings().List(context.Background(), metav1.ListOptions{})
+	clusterRoleBindings, err := clientset.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("error listing cluster role bindings: %v", err)
 	}
 	
+	// Create maps to cache roles and cluster roles
+	roleCache := make(map[string]*rbacv1.Role)
+	clusterRoleCache := make(map[string]*rbacv1.ClusterRole)
+	
+	// Process role bindings in parallel
+	var wg sync.WaitGroup
+	permChan := make(chan []IdentityPermission, len(roleBindings.Items)+len(clusterRoleBindings.Items))
+	semaphore := make(chan struct{}, 5) // Limit concurrent API requests
+	
 	// Process role bindings
 	for _, rb := range roleBindings.Items {
 		if isIdentityInBinding(identity, rb.Subjects) {
-			perms, err := getRolePermissions(clientset, rb.RoleRef, rb.Namespace)
-			if err != nil {
-				log.Printf("Warning: Could not fetch permissions for %s %s: %v", identity.Type, identity.Name, err)
-				continue // Continue instead of returning error
-			}
-			permissions = append(permissions, perms...)
+			wg.Add(1)
+			go func(rb rbacv1.RoleBinding) {
+				defer wg.Done()
+				semaphore <- struct{}{} // Acquire semaphore
+				defer func() { <-semaphore }() // Release semaphore
+				
+				perms, err := getRolePermissionsWithCache(clientset, rb.RoleRef, rb.Namespace, roleCache, clusterRoleCache)
+				if err != nil {
+					log.Printf("Warning: Could not fetch permissions for %s: %v", rb.Name, err)
+					return
+				}
+				permChan <- perms
+			}(rb)
 		}
 	}
 	
 	// Process cluster role bindings
 	for _, crb := range clusterRoleBindings.Items {
 		if isIdentityInBinding(identity, crb.Subjects) {
-			perms, err := getRolePermissions(clientset, crb.RoleRef, "")
-			if err != nil {
-				log.Printf("Warning: Could not fetch permissions for %s %s: %v", identity.Type, identity.Name, err)
-				continue // Continue instead of returning error
-			}
-			permissions = append(permissions, perms...)
+			wg.Add(1)
+			go func(crb rbacv1.ClusterRoleBinding) {
+				defer wg.Done()
+				semaphore <- struct{}{} // Acquire semaphore
+				defer func() { <-semaphore }() // Release semaphore
+				
+				perms, err := getRolePermissionsWithCache(clientset, crb.RoleRef, "", roleCache, clusterRoleCache)
+				if err != nil {
+					log.Printf("Warning: Could not fetch permissions for %s: %v", crb.Name, err)
+					return
+				}
+				permChan <- perms
+			}(crb)
 		}
 	}
 	
+	// Close permission channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(permChan)
+	}()
+	
+	// Collect permissions
+	for perms := range permChan {
+		permissions = append(permissions, perms...)
+	}
+	
 	return permissions, nil
+}
+
+// Add role caching
+func getRolePermissionsWithCache(
+	clientset *kubernetes.Clientset,
+	roleRef rbacv1.RoleRef,
+	namespace string,
+	roleCache map[string]*rbacv1.Role,
+	clusterRoleCache map[string]*rbacv1.ClusterRole,
+) ([]IdentityPermission, error) {
+	var permissions []IdentityPermission
+	ctx := context.Background()
+	
+	switch roleRef.Kind {
+	case "ClusterRole":
+		// Check cache first
+		if cachedRole, exists := clusterRoleCache[roleRef.Name]; exists {
+			return convertRulesToPermissions(cachedRole.Rules), nil
+		}
+		
+		role, err := clientset.RbacV1().ClusterRoles().Get(ctx, roleRef.Name, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		
+		// Cache the result
+		clusterRoleCache[roleRef.Name] = role
+		return convertRulesToPermissions(role.Rules), nil
+		
+	case "Role":
+		cacheKey := fmt.Sprintf("%s/%s", namespace, roleRef.Name)
+		if cachedRole, exists := roleCache[cacheKey]; exists {
+			return convertRulesToPermissions(cachedRole.Rules), nil
+		}
+		
+		role, err := clientset.RbacV1().Roles(namespace).Get(ctx, roleRef.Name, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		
+		// Cache the result
+		roleCache[cacheKey] = role
+		return convertRulesToPermissions(role.Rules), nil
+	}
+	
+	return permissions, nil
+}
+
+// Helper function to convert rules to permissions
+func convertRulesToPermissions(rules []rbacv1.PolicyRule) []IdentityPermission {
+	var permissions []IdentityPermission
+	for _, rule := range rules {
+		permissions = append(permissions, IdentityPermission{
+			Resources: rule.Resources,
+			Verbs:     rule.Verbs,
+			APIGroups: rule.APIGroups,
+		})
+	}
+	return permissions
 }
 
 func CheckIdentityPermissions(config *PermissionsConfig, identity Identity) []Violation {
@@ -451,26 +582,52 @@ func hasOverlap(a, b []string) bool {
 }
 
 func OutputViolations(violations []Violation) {
-	// Maps to store violations by scope and type
-	clusterViolations := make(map[string]map[string][]Identity) // violation -> type -> identities
-	namespaceViolations := make(map[string]map[string][]Identity) // namespace -> type -> identities
+	// Maps to store consolidated violations
+	clusterViolations := make(map[string]map[string]map[string]*ConsolidatedViolation)  // violation -> type -> name -> ConsolidatedViolation
+	namespaceViolations := make(map[string]map[string]map[string]*ConsolidatedViolation)  // namespace -> type -> name -> ConsolidatedViolation
 
 	// Organize violations
 	for _, v := range violations {
 		if v.Scope == "cluster-wide" {
 			if _, exists := clusterViolations[v.Rule]; !exists {
-				clusterViolations[v.Rule] = make(map[string][]Identity)
+				clusterViolations[v.Rule] = make(map[string]map[string]*ConsolidatedViolation)
 			}
-			// Avoid duplicate identities for same violation
-			if !containsIdentity(clusterViolations[v.Rule][v.Identity.Type], v.Identity) {
-				clusterViolations[v.Rule][v.Identity.Type] = append(clusterViolations[v.Rule][v.Identity.Type], v.Identity)
+			if _, exists := clusterViolations[v.Rule][v.Identity.Type]; !exists {
+				clusterViolations[v.Rule][v.Identity.Type] = make(map[string]*ConsolidatedViolation)
+			}
+			
+			if cv, exists := clusterViolations[v.Rule][v.Identity.Type][v.Identity.Name]; exists {
+				cv.Violations = append(cv.Violations, v.Rule)
+				cv.Impact[v.Rule] = v.Impact
+			} else {
+				clusterViolations[v.Rule][v.Identity.Type][v.Identity.Name] = &ConsolidatedViolation{
+					Identity:   v.Identity.Name,
+					Type:      v.Identity.Type,
+					Scope:     v.Scope,
+					Violations: []string{v.Rule},
+					Impact:    map[string]string{v.Rule: v.Impact},
+				}
 			}
 		} else {
 			if _, exists := namespaceViolations[v.Identity.Namespace]; !exists {
-				namespaceViolations[v.Identity.Namespace] = make(map[string][]Identity)
+				namespaceViolations[v.Identity.Namespace] = make(map[string]map[string]*ConsolidatedViolation)
 			}
-			if !containsIdentity(namespaceViolations[v.Identity.Namespace][v.Identity.Type], v.Identity) {
-				namespaceViolations[v.Identity.Namespace][v.Identity.Type] = append(namespaceViolations[v.Identity.Namespace][v.Identity.Type], v.Identity)
+			if _, exists := namespaceViolations[v.Identity.Namespace][v.Identity.Type]; !exists {
+				namespaceViolations[v.Identity.Namespace][v.Identity.Type] = make(map[string]*ConsolidatedViolation)
+			}
+			
+			if cv, exists := namespaceViolations[v.Identity.Namespace][v.Identity.Type][v.Identity.Name]; exists {
+				cv.Violations = append(cv.Violations, v.Rule)
+				cv.Impact[v.Rule] = v.Impact
+			} else {
+				namespaceViolations[v.Identity.Namespace][v.Identity.Type][v.Identity.Name] = &ConsolidatedViolation{
+					Identity:   v.Identity.Name,
+					Type:      v.Identity.Type,
+					Namespace: v.Identity.Namespace,
+					Scope:     v.Scope,
+					Violations: []string{v.Rule},
+					Impact:    map[string]string{v.Rule: v.Impact},
+				}
 			}
 		}
 	}
@@ -488,29 +645,32 @@ func OutputViolations(violations []Violation) {
 		fmt.Println("No cluster-wide violations found.")
 	} else {
 		for violationRule, typeMap := range clusterViolations {
-			fmt.Printf("\n⚠️  %s\n", violationRule)
+			fmt.Printf("\n⚠️  Violation: %s\n", violationRule)
 			
 			// Print Users
 			if users := typeMap["user"]; len(users) > 0 {
 				fmt.Println("  👤 Users:")
-				for _, identity := range users {
-					fmt.Printf("    - %s\n", identity.Name)
+				for _, cv := range users {
+					fmt.Printf("    - %s\n", cv.Identity)
+					fmt.Printf("      Impact: %s\n", cv.Impact[violationRule])
 				}
 			}
 			
 			// Print Groups
 			if groups := typeMap["group"]; len(groups) > 0 {
 				fmt.Println("  👥 Groups:")
-				for _, identity := range groups {
-					fmt.Printf("    - %s\n", identity.Name)
+				for _, cv := range groups {
+					fmt.Printf("    - %s\n", cv.Identity)
+					fmt.Printf("      Impact: %s\n", cv.Impact[violationRule])
 				}
 			}
 			
 			// Print Service Accounts
 			if sas := typeMap["serviceAccount"]; len(sas) > 0 {
 				fmt.Println("  🔧 Service Accounts:")
-				for _, identity := range sas {
-					fmt.Printf("    - %s\n", identity.Name)
+				for _, cv := range sas {
+					fmt.Printf("    - %s\n", cv.Identity)
+					fmt.Printf("      Impact: %s\n", cv.Impact[violationRule])
 				}
 			}
 		}
@@ -529,24 +689,39 @@ func OutputViolations(violations []Violation) {
 			// Print Users
 			if users := typeMap["user"]; len(users) > 0 {
 				fmt.Println("  👤 Users:")
-				for _, identity := range users {
-					fmt.Printf("    - %s\n", identity.Name)
+				for _, cv := range users {
+					fmt.Printf("    - %s\n", cv.Identity)
+					fmt.Println("      Violations:")
+					for _, v := range cv.Violations {
+						fmt.Printf("        • %s\n", v)
+						fmt.Printf("          Impact: %s\n", cv.Impact[v])
+					}
 				}
 			}
 			
 			// Print Groups
 			if groups := typeMap["group"]; len(groups) > 0 {
 				fmt.Println("  👥 Groups:")
-				for _, identity := range groups {
-					fmt.Printf("    - %s\n", identity.Name)
+				for _, cv := range groups {
+					fmt.Printf("    - %s\n", cv.Identity)
+					fmt.Println("      Violations:")
+					for _, v := range cv.Violations {
+						fmt.Printf("        • %s\n", v)
+						fmt.Printf("          Impact: %s\n", cv.Impact[v])
+					}
 				}
 			}
 			
 			// Print Service Accounts
 			if sas := typeMap["serviceAccount"]; len(sas) > 0 {
 				fmt.Println("  🔧 Service Accounts:")
-				for _, identity := range sas {
-					fmt.Printf("    - %s\n", identity.Name)
+				for _, cv := range sas {
+					fmt.Printf("    - %s\n", cv.Identity)
+					fmt.Println("      Violations:")
+					for _, v := range cv.Violations {
+						fmt.Printf("        • %s\n", v)
+						fmt.Printf("          Impact: %s\n", cv.Impact[v])
+					}
 				}
 			}
 		}
@@ -567,7 +742,7 @@ func containsIdentity(identities []Identity, identity Identity) bool {
 }
 
 // Modified summary function
-func printSummary(clusterViolations map[string]map[string][]Identity, namespaceViolations map[string]map[string][]Identity) {
+func printSummary(clusterViolations map[string]map[string]map[string]*ConsolidatedViolation, namespaceViolations map[string]map[string]map[string]*ConsolidatedViolation) {
 	fmt.Println("\n📊 Summary:")
 	fmt.Println("=========")
 	
@@ -609,43 +784,6 @@ func printSummary(clusterViolations map[string]map[string][]Identity, namespaceV
 	if count := identityTypes["serviceAccount"]; count > 0 {
 		fmt.Printf("- 🔧 Service Accounts: %d\n", count)
 	}
-}
-
-func getRolePermissions(clientset *kubernetes.Clientset, roleRef rbacv1.RoleRef, namespace string) ([]IdentityPermission, error) {
-	var permissions []IdentityPermission
-	ctx := context.Background()
-
-	switch roleRef.Kind {
-	case "ClusterRole":
-		role, err := clientset.RbacV1().ClusterRoles().Get(ctx, roleRef.Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("error getting cluster role %s: %v", roleRef.Name, err)
-		}
-		
-		for _, rule := range role.Rules {
-			permissions = append(permissions, IdentityPermission{
-				Resources: rule.Resources,
-				Verbs:     rule.Verbs,
-				APIGroups: rule.APIGroups,
-			})
-		}
-
-	case "Role":
-		role, err := clientset.RbacV1().Roles(namespace).Get(ctx, roleRef.Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("error getting role %s in namespace %s: %v", roleRef.Name, namespace, err)
-		}
-		
-		for _, rule := range role.Rules {
-			permissions = append(permissions, IdentityPermission{
-				Resources: rule.Resources,
-				Verbs:     rule.Verbs,
-				APIGroups: rule.APIGroups,
-			})
-		}
-	}
-
-	return permissions, nil
 }
 
 func isIdentityInBinding(identity Identity, subjects []rbacv1.Subject) bool {
