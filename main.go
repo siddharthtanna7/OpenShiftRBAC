@@ -608,84 +608,83 @@ func hasOverlap(a, b []string) bool {
 }
 
 func OutputViolations(violations []Violation) {
-	// Single map for all violations
-	consolidatedViolations := make(map[string]*ConsolidatedViolation)
+    consolidatedViolations := make(map[string]*ConsolidatedViolation)
 
-	// Consolidate violations
-	for _, v := range violations {
-		var key string
-		if v.Identity.Type == "serviceAccount" {
-			key = fmt.Sprintf("%s:%s", v.Identity.Namespace, v.Identity.Name)
-		} else {
-			key = v.Identity.Name
-		}
+    // Consolidate violations
+    for _, v := range violations {
+        var key string
+        if v.Identity.Type == "serviceAccount" {
+            key = fmt.Sprintf("%s:%s", v.Identity.Namespace, v.Identity.Name)
+        } else {
+            key = v.Identity.Name
+        }
 
-		if _, exists := consolidatedViolations[key]; !exists {
-			consolidatedViolations[key] = &ConsolidatedViolation{
-				Identity:   v.Identity.Name,
-				Type:      v.Identity.Type,
-				Namespace: v.Identity.Namespace,
-				Violations: make([]string, 0),
-				Impacts:   make(map[string]string),
-				Scope:     v.Scope,
-			}
-		}
-		addViolation(consolidatedViolations[key], v)
-	}
+        if _, exists := consolidatedViolations[key]; !exists {
+            consolidatedViolations[key] = &ConsolidatedViolation{
+                Identity:   v.Identity.Name,
+                Type:      v.Identity.Type,
+                Namespace: v.Identity.Namespace,
+                Violations: make([]string, 0),
+                Impacts:   make(map[string]string),
+                Scope:     v.Scope,
+            }
+        }
 
-	// Print Report
-	fmt.Println("\nSECURITY VIOLATIONS REPORT")
-	fmt.Println("==========================")
+        addViolation(consolidatedViolations[key], v)
+    }
 
-	printViolationsByType(consolidatedViolations, "user", "Users")
-	printViolationsByType(consolidatedViolations, "group", "Groups")
-	printViolationsByType(consolidatedViolations, "serviceAccount", "Service Accounts")
+    // Print Report
+    fmt.Println("\nSECURITY VIOLATIONS REPORT")
+    fmt.Println("==========================")
 
-	printSummary(consolidatedViolations)
-}
+    printViolationsByType(consolidatedViolations, "user", "Users")
+    printViolationsByType(consolidatedViolations, "group", "Groups")
+    printViolationsByType(consolidatedViolations, "serviceAccount", "Service Accounts")
 
-func printViolationsByType(violations map[string]*ConsolidatedViolation, identityType, header string) {
-	typeViolations := make([]*ConsolidatedViolation, 0)
-	for _, v := range violations {
-		if v.Type == identityType {
-			typeViolations = append(typeViolations, v)
-		}
-	}
-
-	// Sort identities for consistent output
-	sort.Slice(typeViolations, func(i, j int) bool {
-		return typeViolations[i].Identity < typeViolations[j].Identity
-	})
-
-	if len(typeViolations) > 0 {
-		fmt.Printf("\n%s\n", header)
-		fmt.Println(strings.Repeat("-", len(header)))
-
-		for _, v := range typeViolations {
-			if len(v.Violations) > 0 {
-				fmt.Printf("\n%s: %s\n", identityType, v.Identity)
-				
-				fmt.Println("Violations:")
-				sort.Strings(v.Violations)
-				for _, violation := range v.Violations {
-					fmt.Printf("  * %s\n", violation)
-					fmt.Printf("    Impact: %s\n", v.Impacts[violation])
-					if v.Scope == "namespace" {
-						fmt.Printf("    Namespace: %s\n", v.Namespace)
-					}
-				}
-			}
-		}
-	}
+    printSummary(consolidatedViolations)
 }
 
 func addViolation(cv *ConsolidatedViolation, v Violation) {
-	if !contains(cv.Violations, v.Rule) {
-		cv.Violations = append(cv.Violations, v.Rule)
-		cv.Impacts[v.Rule] = v.Impact
-		cv.Namespace = v.Identity.Namespace
-		cv.Scope = v.Scope
-	}
+    if !contains(cv.Violations, v.Rule) {
+        cv.Violations = append(cv.Violations, v.Rule)
+        cv.Impacts[v.Rule] = v.Impact
+        cv.Namespace = v.Identity.Namespace
+        cv.Scope = v.Scope
+    }
+}
+
+func printViolationsByType(violations map[string]*ConsolidatedViolation, identityType, header string) {
+    typeViolations := make([]*ConsolidatedViolation, 0)
+    for _, v := range violations {
+        if v.Type == identityType {
+            typeViolations = append(typeViolations, v)
+        }
+    }
+
+    sort.Slice(typeViolations, func(i, j int) bool {
+        return typeViolations[i].Identity < typeViolations[j].Identity
+    })
+
+    if len(typeViolations) > 0 {
+        fmt.Printf("\n%s\n", header)
+        fmt.Println(strings.Repeat("-", len(header)))
+
+        for _, v := range typeViolations {
+            if len(v.Violations) > 0 {
+                fmt.Printf("\n%s: %s\n", identityType, v.Identity)
+                
+                fmt.Println("Violations:")
+                sort.Strings(v.Violations)
+                for _, violation := range v.Violations {
+                    fmt.Printf("  * %s\n", violation)
+                    fmt.Printf("    Impact: %s\n", v.Impacts[violation])
+                    if v.Namespace != "" {
+                        fmt.Printf("    Namespace: %s\n", v.Namespace)
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Modified summary function
