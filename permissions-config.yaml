@@ -1,111 +1,233 @@
 sensitivePermissions:
   # Cluster-wide Administrative Access
-  - name: "Cluster Admin Access"
+  - name: "cluster-admin-access"
+    apiGroups: ["*"]
     resources: ["*"]
     verbs: ["*"]
-    impact: "Complete cluster control"
-    apiGroups: ["*"]
+    impact: "Critical - Full cluster administrative access"
     exceptions:
       users: ["system:admin", "system:masters"]
       serviceAccounts: ["openshift-cluster-version:default"]
       groups: ["system:masters"]
 
-  # Secrets Management
-  - name: "Secrets Access"
-    resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-    impact: "Can access sensitive data including credentials"
-    apiGroups: [""]
-    exceptions:
-      serviceAccounts: ["openshift-monitoring:prometheus-k8s"]
-
   # Security Context Constraints
-  - name: "SCC Management"
-    resources: ["securitycontextconstraints"]
-    verbs: ["update", "create", "delete"]
-    impact: "Can modify security policies affecting pod security"
+  - name: "scc-management"
     apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    verbs: ["create", "delete", "update", "patch"]
+    impact: "High - Can modify security policies affecting pod security"
     exceptions:
-      users: ["system:admin"]
-      groups: ["system:masters"]
+      serviceAccounts: ["openshift-security:scc-controller"]
 
-  # OAuth and Identity Management
-  - name: "Identity Management"
-    resources: ["users", "groups", "identities", "oauthclients"]
-    verbs: ["create", "delete", "update"]
-    impact: "Can modify authentication and user access"
-    apiGroups: ["user.openshift.io", "oauth.openshift.io"]
+  # RBAC Management
+  - name: "rbac-management"
+    apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+    verbs: ["create", "delete", "update", "patch"]
+    impact: "High - Can modify access controls and elevate privileges"
     exceptions:
       serviceAccounts: ["openshift-authentication-operator:authentication-operator"]
 
-  # Node Management
-  - name: "Node Control"
-    resources: ["nodes"]
-    verbs: ["create", "delete", "update", "patch"]
-    impact: "Can modify cluster infrastructure"
-    apiGroups: [""]
+  # User and Group Management
+  - name: "user-management"
+    apiGroups: ["user.openshift.io"]
+    resources: ["users", "groups", "identities", "useridentitymappings"]
+    verbs: ["create", "delete", "update"]
+    impact: "High - Can create and modify user accounts"
     exceptions:
-      serviceAccounts: ["openshift-machine-config-operator:machine-config-controller"]
+      serviceAccounts: ["openshift-authentication-operator:oauth-openshift"]
 
-  # Project/Namespace Control
-  - name: "Project Management"
-    resources: ["projects", "namespaces"]
-    verbs: ["create", "delete"]
-    impact: "Can create and delete isolated environments"
+  # OAuth and Authentication
+  - name: "oauth-management"
+    apiGroups: ["oauth.openshift.io", "config.openshift.io"]
+    resources: ["oauthclients", "authentications", "oauthaccesstokens"]
+    verbs: ["create", "delete", "update"]
+    impact: "High - Can modify authentication configuration"
+
+  # Secret Management
+  - name: "secret-management"
     apiGroups: [""]
-    exceptions:
-      serviceAccounts: ["openshift-infra:namespace-controller"]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+    impact: "High - Access to sensitive data including credentials"
+
+  # ConfigMap Management
+  - name: "configmap-management"
+    apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "update", "delete"]
+    impact: "Medium - Can modify application configurations"
+
+  # Node Management
+  - name: "node-management"
+    apiGroups: ["", "machine.openshift.io"]
+    resources: ["nodes", "machines", "machinesets"]
+    verbs: ["create", "delete", "update", "patch"]
+    impact: "High - Can modify cluster infrastructure"
 
   # Storage Management
-  - name: "Storage Control"
-    resources: ["persistentvolumes", "storageclasses"]
-    verbs: ["create", "delete", "update"]
-    impact: "Can modify cluster storage configuration"
+  - name: "storage-management"
     apiGroups: ["storage.k8s.io"]
-    exceptions:
-      serviceAccounts: ["openshift-cluster-storage-operator:storage-operator"]
+    resources: ["storageclasses", "volumeattachments", "persistentvolumes"]
+    verbs: ["create", "delete", "update"]
+    impact: "Medium - Can modify storage configurations"
 
   # Network Policy
-  - name: "Network Policy Control"
-    resources: ["networkpolicies", "egressfirewalls"]
-    verbs: ["create", "update", "delete"]
-    impact: "Can modify network security policies"
-    apiGroups: ["networking.k8s.io", "k8s.ovn.org"]
-    exceptions:
-      serviceAccounts: ["openshift-network-operator:network-operator"]
+  - name: "network-policy-management"
+    apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "delete", "update"]
+    impact: "Medium - Can modify network security policies"
+
+  # Project/Namespace Management
+  - name: "project-management"
+    apiGroups: ["project.openshift.io"]
+    resources: ["projects", "projectrequests"]
+    verbs: ["create", "delete", "update"]
+    impact: "Medium - Can create and modify project isolation"
+
+  # Security Policy Reviews
+  - name: "security-policy-review"
+    apiGroups: ["security.openshift.io"]
+    resources: ["podsecuritypolicyreviews", "podsecuritypolicyselfsubjectreviews"]
+    verbs: ["create"]
+    impact: "Medium - Can review security policies"
 
   # Operator Management
-  - name: "Operator Lifecycle"
-    resources: ["operators", "clusterserviceversions", "subscriptions"]
-    verbs: ["create", "delete", "update"]
-    impact: "Can modify cluster operators and services"
-    apiGroups: ["operators.coreos.com"]
-    exceptions:
-      serviceAccounts: ["openshift-operator-lifecycle-manager:olm-operator"]
-
-  # Monitoring Stack
-  - name: "Monitoring Configuration"
-    resources: ["prometheuses", "alertmanagers", "servicemonitors"]
+  - name: "operator-management"
+    apiGroups: ["operators.coreos.com", "config.openshift.io"]
+    resources: ["operators", "operatorhubs", "clusterserviceversions"]
     verbs: ["create", "update", "delete"]
-    impact: "Can modify cluster monitoring"
-    apiGroups: ["monitoring.coreos.com"]
-    exceptions:
-      serviceAccounts: ["openshift-monitoring:cluster-monitoring-operator"]
+    impact: "High - Can modify cluster operators and components"
 
-  # Machine Management
-  - name: "Machine Control"
-    resources: ["machines", "machinesets", "machinehealthchecks"]
-    verbs: ["create", "delete", "update"]
-    impact: "Can modify cluster node infrastructure"
-    apiGroups: ["machine.openshift.io"]
-    exceptions:
-      serviceAccounts: ["openshift-machine-api:machine-api-operator"]
+  # Route Management
+  - name: "route-management"
+    apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["create", "update", "delete"]
+    impact: "Medium - Can expose services externally"
 
-  # Image Registry
-  - name: "Registry Management"
-    resources: ["imagestreams", "imagestreamtags"]
-    verbs: ["create", "delete", "update"]
-    impact: "Can modify container image sources"
-    apiGroups: ["image.openshift.io"]
+  # Pod Execution
+  - name: "privileged-pod-execution"
+    apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete"]
+    impact: "High - Can run potentially privileged containers"
+
+  # CSI Driver Management
+  - name: "csi-management"
+    apiGroups: ["storage.k8s.io"]
+    resources: ["csidrivers", "csinodes"]
+    verbs: ["create", "update", "delete"]
+    impact: "High - Can modify storage drivers"
+
+  # Virtual Machine Management (KubeVirt)
+  - name: "vm-management"
+    apiGroups: 
+      - "kubevirt.io"
+      - "snapshot.kubevirt.io"
+      - "clone.kubevirt.io"
+      - "pool.kubevirt.io"
+    resources: 
+      - "virtualmachines"
+      - "virtualmachineinstances"
+      - "virtualmachineinstancemigrations"
+      - "virtualmachineinstancereplicasets"
+      - "virtualmachinesnapshots"
+      - "virtualmachinesnapshotcontents"
+      - "virtualmachineclones"
+      - "virtualmachinepools"
+    verbs: ["create", "delete", "update", "patch"]
+    impact: "High - Can manage virtual machines and their lifecycle"
     exceptions:
-      serviceAccounts: ["openshift-image-registry:registry"]
+      serviceAccounts: ["kubevirt-operator:kubevirt-operator"]
+
+  # Virtual Machine Instance Type Management
+  - name: "vm-instancetype-management"
+    apiGroups: ["instancetype.kubevirt.io"]
+    resources: 
+      - "virtualmachineinstancetypes"
+      - "virtualmachineclusterinstancetypes"
+      - "virtualmachinepreferences"
+      - "virtualmachineclusterpreferences"
+    verbs: ["create", "delete", "update"]
+    impact: "Medium - Can modify VM instance types and preferences"
+
+  # Network Attachment Definition Management (Multus)
+  - name: "multus-management"
+    apiGroups: ["k8s.cni.cncf.io"]
+    resources: 
+      - "network-attachment-definitions"
+      - "networkattachmentdefinitions"
+    verbs: ["create", "delete", "update", "patch"]
+    impact: "High - Can modify additional network configurations"
+    exceptions:
+      serviceAccounts: ["multus-operator:multus-operator"]
+
+  # NMState Configuration Management
+  - name: "nmstate-management"
+    apiGroups: ["nmstate.io"]
+    resources: 
+      - "nmstates"
+      - "nodenetworkconfigurations"
+      - "nodenetworkconfigurationpolicies"
+      - "nodenetworkconfigurationenactments"
+      - "nodenetworkstates"
+    verbs: ["create", "delete", "update", "patch"]
+    impact: "Critical - Can modify node network configurations"
+    exceptions:
+      serviceAccounts: ["nmstate-operator:nmstate-operator"]
+
+  # Network State Access
+  - name: "network-state-access"
+    apiGroups: ["nmstate.io"]
+    resources: ["nodenetworkstates"]
+    verbs: ["get", "list", "watch"]
+    impact: "Low - Can view node network states"
+
+  # Whereabouts IPAM Management
+  - name: "ipam-management"
+    apiGroups: ["whereabouts.cni.cncf.io"]
+    resources: 
+      - "ippools"
+      - "overlappingrangeipreservations"
+    verbs: ["create", "delete", "update"]
+    impact: "Medium - Can modify IP address management"
+
+  # VM Storage Management
+  - name: "vm-storage-management"
+    apiGroups: 
+      - "cdi.kubevirt.io"
+      - "export.kubevirt.io"
+    resources: 
+      - "datavolumes"
+      - "datasources"
+      - "dataimportcrons"
+      - "virtualmachineexports"
+    verbs: ["create", "delete", "update"]
+    impact: "Medium - Can manage VM storage resources"
+    exceptions:
+      serviceAccounts: ["cdi-operator:cdi-operator"]
+
+  # VM Migration Management
+  - name: "vm-migration-management"
+    apiGroups: ["migrations.kubevirt.io"]
+    resources: ["migrationpolicies"]
+    verbs: ["create", "delete", "update"]
+    impact: "Medium - Can configure VM migration policies"
+
+  # Host Device Management
+  - name: "host-device-management"
+    apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachineinstancepresets"]
+    verbs: ["create", "delete", "update"]
+    impact: "High - Can configure VM access to host devices"
+
+  # Network Interface Management
+  - name: "network-interface-management"
+    apiGroups: ["k8s.cni.cncf.io"]
+    resources: ["network-attachment-definitions"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+    impact: "High - Can modify network interfaces"
+    exceptions:
+      serviceAccounts: ["multus-operator:multus-operator"]
