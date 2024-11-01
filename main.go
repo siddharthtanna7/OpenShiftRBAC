@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"sort"
-	"strings"
 	"time"
 	"flag"
 
@@ -16,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	openshiftclientset "github.com/openshift/client-go/user/clientset/versioned"
+	"github.com/schollz/progressbar/v3"
 )
 
 // Structs for YAML configuration
@@ -124,6 +123,8 @@ func main() {
 		ocClient = nil
 	}
 
+	fmt.Println("\n🚀 Starting permission audit...")
+	
 	// Get identities and check permissions
 	identities, err := GetClusterIdentities(k8sClient, ocClient)
 	if err != nil {
@@ -138,6 +139,8 @@ func main() {
 		}
 	}
 
+	fmt.Println("\n🔎 Analyzing permissions...")
+	
 	// Check permissions and collect violations
 	var violations []Violation
 	for _, identity := range filteredIdentities {
@@ -145,6 +148,8 @@ func main() {
 		violations = append(violations, identityViolations...)
 	}
 
+	fmt.Println("\n📊 Generating report...")
+	
 	// Output results
 	OutputViolations(violations)
 }
@@ -170,6 +175,8 @@ func GetClusterIdentities(k8sClient *kubernetes.Clientset, ocClient *openshiftcl
 	// Detect if we're running on OpenShift
 	isOpenShift := isOpenShiftCluster(k8sClient)
 	
+	fmt.Println("\n🔍 Scanning cluster identities...")
+	
 	// Get Users and Groups only if we're on OpenShift
 	if isOpenShift && ocClient != nil {
 		// Get OpenShift Users
@@ -177,7 +184,26 @@ func GetClusterIdentities(k8sClient *kubernetes.Clientset, ocClient *openshiftcl
 		if err != nil {
 			log.Printf("Warning: Could not fetch OpenShift users: %v", err)
 		} else {
+			bar := progressbar.NewOptions(len(users.Items),
+				progressbar.OptionSetDescription("Processing Users"),
+				progressbar.OptionSetTheme(progressbar.Theme{
+					Saucer:        "=",
+					SaucerHead:    ">",
+					SaucerPadding: " ",
+					BarStart:      "[",
+					BarEnd:        "]",
+				}),
+				progressbar.OptionSetWidth(40),
+				progressbar.OptionClearOnFinish(),
+				progressbar.OptionSetRenderBlankState(true),
+				progressbar.OptionEnableColorCodes(true),
+				progressbar.OptionShowCount(),
+				progressbar.OptionSetPredictTime(false),
+				progressbar.OptionFullWidth(),
+			)
+			
 			for _, user := range users.Items {
+				bar.Add(1)
 				identity := Identity{
 					Name:      user.Name,
 					Type:      "user",
@@ -193,6 +219,7 @@ func GetClusterIdentities(k8sClient *kubernetes.Clientset, ocClient *openshiftcl
 				identity.Permissions = perms
 				identities = append(identities, identity)
 			}
+			fmt.Println() // New line after progress bar
 		}
 
 		// Get OpenShift Groups
@@ -200,7 +227,26 @@ func GetClusterIdentities(k8sClient *kubernetes.Clientset, ocClient *openshiftcl
 		if err != nil {
 			log.Printf("Warning: Could not fetch OpenShift groups: %v", err)
 		} else {
+			bar := progressbar.NewOptions(len(groups.Items),
+				progressbar.OptionSetDescription("Processing Groups"),
+				progressbar.OptionSetTheme(progressbar.Theme{
+					Saucer:        "=",
+					SaucerHead:    ">",
+					SaucerPadding: " ",
+					BarStart:      "[",
+					BarEnd:        "]",
+				}),
+				progressbar.OptionSetWidth(40),
+				progressbar.OptionClearOnFinish(),
+				progressbar.OptionSetRenderBlankState(true),
+				progressbar.OptionEnableColorCodes(true),
+				progressbar.OptionShowCount(),
+				progressbar.OptionSetPredictTime(false),
+				progressbar.OptionFullWidth(),
+			)
+			
 			for _, group := range groups.Items {
+				bar.Add(1)
 				identity := Identity{
 					Name:      group.Name,
 					Type:      "group",
@@ -216,31 +262,52 @@ func GetClusterIdentities(k8sClient *kubernetes.Clientset, ocClient *openshiftcl
 				identity.Permissions = perms
 				identities = append(identities, identity)
 			}
+			fmt.Println() // New line after progress bar
 		}
 	}
 
-	// Get Service Accounts (works on both Kubernetes and OpenShift)
+	// Get Service Accounts
 	sas, err := k8sClient.CoreV1().ServiceAccounts("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("error listing service accounts: %v", err)
 	}
 	
+	bar := progressbar.NewOptions(len(sas.Items),
+		progressbar.OptionSetDescription("Processing Service Accounts"),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "=",
+			SaucerHead:    ">",
+			SaucerPadding: " ",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}),
+		progressbar.OptionSetWidth(40),
+		progressbar.OptionClearOnFinish(),
+		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionEnableColorCodes(true),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetPredictTime(false),
+		progressbar.OptionFullWidth(),
+	)
+	
 	for _, sa := range sas.Items {
-			identity := Identity{
-				Name:      sa.Name,
-				Type:      "serviceAccount",
-				Namespace: sa.Namespace,
-				Scope:     "namespace",
-			}
-			
-			perms, err := getIdentityPermissions(k8sClient, identity)
-			if err != nil {
-				log.Printf("Warning: Could not fetch permissions for service account %s: %v", sa.Name, err)
-				continue
-			}
-			identity.Permissions = perms
-			identities = append(identities, identity)
+		bar.Add(1)
+		identity := Identity{
+			Name:      sa.Name,
+			Type:      "serviceAccount",
+			Namespace: sa.Namespace,
+			Scope:     "namespace",
+		}
+		
+		perms, err := getIdentityPermissions(k8sClient, identity)
+		if err != nil {
+			log.Printf("Warning: Could not fetch permissions for service account %s: %v", sa.Name, err)
+			continue
+		}
+		identity.Permissions = perms
+		identities = append(identities, identity)
 	}
+	fmt.Println() // New line after progress bar
 	
 	return identities, nil
 }
@@ -263,9 +330,10 @@ func getIdentityPermissions(clientset *kubernetes.Clientset, identity Identity) 
 	// Process role bindings
 	for _, rb := range roleBindings.Items {
 		if isIdentityInBinding(identity, rb.Subjects) {
-			perms, err := getRolePermissions(clientset, rb.RoleRef)
+			perms, err := getRolePermissions(clientset, rb.RoleRef, rb.Namespace)
 			if err != nil {
-				return nil, err
+				log.Printf("Warning: Could not fetch permissions for %s %s: %v", identity.Type, identity.Name, err)
+				continue // Continue instead of returning error
 			}
 			permissions = append(permissions, perms...)
 		}
@@ -274,9 +342,10 @@ func getIdentityPermissions(clientset *kubernetes.Clientset, identity Identity) 
 	// Process cluster role bindings
 	for _, crb := range clusterRoleBindings.Items {
 		if isIdentityInBinding(identity, crb.Subjects) {
-			perms, err := getRolePermissions(clientset, crb.RoleRef)
+			perms, err := getRolePermissions(clientset, crb.RoleRef, "")
 			if err != nil {
-				return nil, err
+				log.Printf("Warning: Could not fetch permissions for %s %s: %v", identity.Type, identity.Name, err)
+				continue // Continue instead of returning error
 			}
 			permissions = append(permissions, perms...)
 		}
@@ -288,7 +357,32 @@ func getIdentityPermissions(clientset *kubernetes.Clientset, identity Identity) 
 func CheckIdentityPermissions(config *PermissionsConfig, identity Identity) []Violation {
 	var violations []Violation
 	
+	bar := progressbar.NewOptions(len(config.SensitivePermissions),
+		progressbar.OptionSetDescription(fmt.Sprintf("Checking %s:%s", identity.Type, identity.Name)),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "=",
+			SaucerHead:    ">",
+			SaucerPadding: " ",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}),
+		progressbar.OptionSetWidth(40),
+		progressbar.OptionClearOnFinish(),
+		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionEnableColorCodes(true),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetPredictTime(false),
+		progressbar.OptionFullWidth(),
+		progressbar.OptionOnCompletion(func() {
+			fmt.Print("\r") // Return carriage to start of line
+		}),
+		progressbar.OptionUseANSICodes(true), // Use ANSI codes for better terminal control
+	)
+	
 	for _, sensitivePermission := range config.SensitivePermissions {
+		bar.Add(1)
+		time.Sleep(10 * time.Millisecond) // Small delay to prevent flickering
+		
 		// Skip if identity is in exceptions
 		if isException(sensitivePermission, identity) {
 			continue
@@ -305,6 +399,7 @@ func CheckIdentityPermissions(config *PermissionsConfig, identity Identity) []Vi
 		}
 	}
 	
+	fmt.Print("\033[K") // Clear the line
 	return violations
 }
 
@@ -356,118 +451,167 @@ func hasOverlap(a, b []string) bool {
 }
 
 func OutputViolations(violations []Violation) {
-	// Map to store consolidated violations
-	consolidated := make(map[string]*ConsolidatedViolation)
-	
-	// Consolidate violations by identity
+	// Maps to store violations by scope and type
+	clusterViolations := make(map[string]map[string][]Identity) // violation -> type -> identities
+	namespaceViolations := make(map[string]map[string][]Identity) // namespace -> type -> identities
+
+	// Organize violations
 	for _, v := range violations {
-		key := v.Identity.Name
-		if _, exists := consolidated[key]; !exists {
-			consolidated[key] = &ConsolidatedViolation{
-				Identity:   v.Identity.Name,
-				Type:      v.Identity.Type,
-				Namespace: v.Identity.Namespace,
-				Scope:     v.Identity.Scope,
-				Violations: []string{},
-					Impact:    make(map[string]string),
+		if v.Scope == "cluster-wide" {
+			if _, exists := clusterViolations[v.Rule]; !exists {
+				clusterViolations[v.Rule] = make(map[string][]Identity)
+			}
+			// Avoid duplicate identities for same violation
+			if !containsIdentity(clusterViolations[v.Rule][v.Identity.Type], v.Identity) {
+				clusterViolations[v.Rule][v.Identity.Type] = append(clusterViolations[v.Rule][v.Identity.Type], v.Identity)
+			}
+		} else {
+			if _, exists := namespaceViolations[v.Identity.Namespace]; !exists {
+				namespaceViolations[v.Identity.Namespace] = make(map[string][]Identity)
+			}
+			if !containsIdentity(namespaceViolations[v.Identity.Namespace][v.Identity.Type], v.Identity) {
+				namespaceViolations[v.Identity.Namespace][v.Identity.Type] = append(namespaceViolations[v.Identity.Namespace][v.Identity.Type], v.Identity)
 			}
 		}
-		consolidated[key].Violations = append(consolidated[key].Violations, v.Rule)
-		consolidated[key].Impact[v.Rule] = v.Impact
 	}
 
-	// Output formatted report
+	// Print report header
 	fmt.Println("\n=== Security Policy Violation Report ===")
 	fmt.Printf("Generated: %s\n", time.Now().Format("2006-01-02 15:04:05"))
-	fmt.Println("=======================================\n")
+	fmt.Println("=======================================")
 
-	// Group by identity type
-	printIdentityViolations("Service Accounts", consolidated, "serviceAccount")
-	printIdentityViolations("Users", consolidated, "user")
-	printIdentityViolations("Groups", consolidated, "group")
+	// Print Cluster-Wide Violations
+	fmt.Println("\n🌐 Cluster-Wide Access Violations:")
+	fmt.Println("================================")
 	
-	// Print summary
-	printSummary(consolidated)
+	if len(clusterViolations) == 0 {
+		fmt.Println("No cluster-wide violations found.")
+	} else {
+		for violationRule, typeMap := range clusterViolations {
+			fmt.Printf("\n⚠️  %s\n", violationRule)
+			
+			// Print Users
+			if users := typeMap["user"]; len(users) > 0 {
+				fmt.Println("  👤 Users:")
+				for _, identity := range users {
+					fmt.Printf("    - %s\n", identity.Name)
+				}
+			}
+			
+			// Print Groups
+			if groups := typeMap["group"]; len(groups) > 0 {
+				fmt.Println("  👥 Groups:")
+				for _, identity := range groups {
+					fmt.Printf("    - %s\n", identity.Name)
+				}
+			}
+			
+			// Print Service Accounts
+			if sas := typeMap["serviceAccount"]; len(sas) > 0 {
+				fmt.Println("  🔧 Service Accounts:")
+				for _, identity := range sas {
+					fmt.Printf("    - %s\n", identity.Name)
+				}
+			}
+		}
+	}
+
+	// Print Namespace-Scoped Violations
+	fmt.Println("\n📁 Namespace-Scoped Violations:")
+	fmt.Println("============================")
+	
+	if len(namespaceViolations) == 0 {
+		fmt.Println("No namespace-scoped violations found.")
+	} else {
+		for namespace, typeMap := range namespaceViolations {
+			fmt.Printf("\n📂 Namespace: %s\n", namespace)
+			
+			// Print Users
+			if users := typeMap["user"]; len(users) > 0 {
+				fmt.Println("  👤 Users:")
+				for _, identity := range users {
+					fmt.Printf("    - %s\n", identity.Name)
+				}
+			}
+			
+			// Print Groups
+			if groups := typeMap["group"]; len(groups) > 0 {
+				fmt.Println("  👥 Groups:")
+				for _, identity := range groups {
+					fmt.Printf("    - %s\n", identity.Name)
+				}
+			}
+			
+			// Print Service Accounts
+			if sas := typeMap["serviceAccount"]; len(sas) > 0 {
+				fmt.Println("  🔧 Service Accounts:")
+				for _, identity := range sas {
+					fmt.Printf("    - %s\n", identity.Name)
+				}
+			}
+		}
+	}
+
+	// Print Summary
+	printSummary(clusterViolations, namespaceViolations)
 }
 
-func printIdentityViolations(title string, consolidated map[string]*ConsolidatedViolation, identityType string) {
-	fmt.Printf("\n%s\n%s\n", title, strings.Repeat("-", len(title)))
+// Helper function to check if an identity is already in a slice
+func containsIdentity(identities []Identity, identity Identity) bool {
+	for _, i := range identities {
+		if i.Name == identity.Name && i.Type == identity.Type && i.Namespace == identity.Namespace {
+			return true
+		}
+	}
+	return false
+}
+
+// Modified summary function
+func printSummary(clusterViolations map[string]map[string][]Identity, namespaceViolations map[string]map[string][]Identity) {
+	fmt.Println("\n📊 Summary:")
+	fmt.Println("=========")
 	
-	found := false
-	for identity, cv := range consolidated {
-		if cv.Type != identityType {
-			continue
+	// Count unique violations and identities
+	clusterViolationCount := len(clusterViolations)
+	namespacesAffected := len(namespaceViolations)
+	
+	var totalIdentities int
+	identityTypes := make(map[string]int)
+	
+	// Count cluster-wide identities
+	for _, typeMap := range clusterViolations {
+		for idType, identities := range typeMap {
+			identityTypes[idType] += len(identities)
+			totalIdentities += len(identities)
 		}
-		found = true
-		
-		fmt.Printf("\n🔴 Identity: %s\n", identity)
-		if cv.Namespace != "" {
-			fmt.Printf("   Namespace: %s\n", cv.Namespace)
-		}
-		fmt.Printf("   Scope: %s\n", cv.Scope)
-		
-		fmt.Println("   Policy Violations:")
-		for i, violation := range cv.Violations {
-			fmt.Printf("   %d. %s\n", i+1, violation)
-			fmt.Printf("      Impact: %s\n", cv.Impact[violation])
-		}
-		
-		fmt.Printf("   Total Violations: %d\n", len(cv.Violations))
 	}
 	
-	if !found {
-		fmt.Println("No violations found.")
+	// Count namespace-scoped identities
+	for _, typeMap := range namespaceViolations {
+		for idType, identities := range typeMap {
+			identityTypes[idType] += len(identities)
+			totalIdentities += len(identities)
+		}
+	}
+	
+	fmt.Printf("\nTotal Violations Found:\n")
+	fmt.Printf("- Cluster-wide violation types: %d\n", clusterViolationCount)
+	fmt.Printf("- Namespaces affected: %d\n", namespacesAffected)
+	fmt.Printf("- Total identities affected: %d\n", totalIdentities)
+	
+	fmt.Printf("\nBreakdown by Identity Type:\n")
+	if count := identityTypes["user"]; count > 0 {
+		fmt.Printf("- 👤 Users: %d\n", count)
+	}
+	if count := identityTypes["group"]; count > 0 {
+		fmt.Printf("- 👥 Groups: %d\n", count)
+	}
+	if count := identityTypes["serviceAccount"]; count > 0 {
+		fmt.Printf("- 🔧 Service Accounts: %d\n", count)
 	}
 }
 
-func printSummary(consolidated map[string]*ConsolidatedViolation) {
-	fmt.Println("\n=== Summary ===")
-	
-	// Count violations by type
-	var totalViolations, totalIdentities int
-	typeCount := make(map[string]int)
-	violationCount := make(map[string]int)
-	
-	for _, cv := range consolidated {
-		totalIdentities++
-		typeCount[cv.Type]++
-		totalViolations += len(cv.Violations)
-		
-		for _, v := range cv.Violations {
-			violationCount[v]++
-		}
-	}
-	
-	// Print statistics
-	fmt.Printf("\nViolation Statistics:\n")
-	fmt.Printf("Total Identities with Violations: %d\n", totalIdentities)
-	fmt.Printf("Total Policy Violations: %d\n\n", totalViolations)
-	
-	fmt.Println("Violations by Identity Type:")
-	for iType, count := range typeCount {
-		fmt.Printf("- %s: %d\n", iType, count)
-	}
-	
-	fmt.Println("\nMost Common Policy Violations:")
-	// Sort violations by frequency
-	type violationFreq struct {
-		name  string
-		count int
-	}
-	var sorted []violationFreq
-	for name, count := range violationCount {
-		sorted = append(sorted, violationFreq{name, count})
-	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].count > sorted[j].count
-	})
-	
-	for _, v := range sorted {
-		fmt.Printf("- %s: %d occurrences\n", v.name, v.count)
-	}
-}
-
-func getRolePermissions(clientset *kubernetes.Clientset, roleRef rbacv1.RoleRef) ([]IdentityPermission, error) {
+func getRolePermissions(clientset *kubernetes.Clientset, roleRef rbacv1.RoleRef, namespace string) ([]IdentityPermission, error) {
 	var permissions []IdentityPermission
 	ctx := context.Background()
 
@@ -487,12 +631,9 @@ func getRolePermissions(clientset *kubernetes.Clientset, roleRef rbacv1.RoleRef)
 		}
 
 	case "Role":
-		// For regular roles, we need to get the role from the correct namespace
-		// This would need to be passed in from the calling context
-		// For now, we'll use the default namespace as an example
-		role, err := clientset.RbacV1().Roles("default").Get(ctx, roleRef.Name, metav1.GetOptions{})
+		role, err := clientset.RbacV1().Roles(namespace).Get(ctx, roleRef.Name, metav1.GetOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("error getting role %s: %v", roleRef.Name, err)
+			return nil, fmt.Errorf("error getting role %s in namespace %s: %v", roleRef.Name, namespace, err)
 		}
 		
 		for _, rule := range role.Rules {
@@ -546,3 +687,4 @@ func shouldIncludeIdentity(identity Identity) bool {
 		return false
 	}
 }
+
