@@ -60,6 +60,7 @@ type Violation struct {
 	Rule        string
 	Impact      string
 	Scope       string
+	Namespace   string
 }
 
 // Add this struct to consolidate violations
@@ -513,22 +514,26 @@ func CheckIdentityPermissions(config *PermissionsConfig, identity Identity) []Vi
 	var violations []Violation
 	
 	for _, sensitivePermission := range config.SensitivePermissions {
-		// Skip if identity is in exceptions
 		if isIdentityExcepted(identity, sensitivePermission.Exceptions) {
 			continue
 		}
 
-		// Check if identity has matching permissions
-		if hasMatchingPermissions(identity.Permissions, sensitivePermission) {
-			// Determine the scope based on the binding type and permissions
-			scope := determineScope(identity.Permissions, sensitivePermission)
-			
-			violations = append(violations, Violation{
-				Identity: identity,
-				Rule:     sensitivePermission.Name,
-				Impact:   sensitivePermission.Impact,
-				Scope:    scope,
-			})
+		for _, perm := range identity.Permissions {
+			if hasMatchingPermissions([]IdentityPermission{perm}, sensitivePermission) {
+				scope := "cluster-wide"
+				if !perm.ClusterWide {
+					scope = "namespace"
+				}
+				
+				violations = append(violations, Violation{
+					Identity: identity,
+					Rule:     sensitivePermission.Name,
+					Impact:   sensitivePermission.Impact,
+					Scope:    scope,
+					Namespace: perm.Namespace,
+				})
+				break  // Break after first match for this permission
+			}
 		}
 	}
 	return violations
@@ -675,10 +680,11 @@ func printViolationsByType(violations map[string]*ConsolidatedViolation, identit
 }
 
 func addViolation(cv *ConsolidatedViolation, v Violation) {
-	cv.Violations = append(cv.Violations, v.Rule)
-	cv.Impacts[v.Rule] = v.Impact
-	if v.Scope == "namespace" {
+	if !contains(cv.Violations, v.Rule) {
+		cv.Violations = append(cv.Violations, v.Rule)
+		cv.Impacts[v.Rule] = v.Impact
 		cv.Namespace = v.Identity.Namespace
+		cv.Scope = v.Scope
 	}
 }
 
