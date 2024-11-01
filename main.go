@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"time"
 	"flag"
 	"sync"
-	"strings"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v2"
 	"k8s.io/client-go/kubernetes"
@@ -49,9 +48,11 @@ type Identity struct {
 }
 
 type IdentityPermission struct {
-	Resources []string
-	Verbs     []string
-	APIGroups []string
+	Resources   []string
+	Verbs       []string
+	APIGroups   []string
+	ClusterWide bool    // true if from ClusterRoleBinding
+	Namespace   string  // namespace of the RoleBinding if not cluster-wide
 }
 
 type Violation struct {
@@ -511,50 +512,47 @@ func convertRulesToPermissions(rules []rbacv1.PolicyRule) []IdentityPermission {
 func CheckIdentityPermissions(config *PermissionsConfig, identity Identity) []Violation {
 	var violations []Violation
 	
-	bar := progressbar.NewOptions(len(config.SensitivePermissions),
-		progressbar.OptionSetDescription(fmt.Sprintf("Checking %s:%s", identity.Type, identity.Name)),
-		progressbar.OptionSetTheme(progressbar.Theme{
-			Saucer:        "=",
-			SaucerHead:    ">",
-			SaucerPadding: " ",
-			BarStart:      "[",
-			BarEnd:        "]",
-		}),
-		progressbar.OptionSetWidth(40),
-		progressbar.OptionClearOnFinish(),
-		progressbar.OptionSetRenderBlankState(true),
-		progressbar.OptionEnableColorCodes(true),
-		progressbar.OptionShowCount(),
-		progressbar.OptionSetPredictTime(false),
-		progressbar.OptionFullWidth(),
-		progressbar.OptionOnCompletion(func() {
-			fmt.Print("\r") // Return carriage to start of line
-		}),
-		progressbar.OptionUseANSICodes(true), // Use ANSI codes for better terminal control
-	)
-	
 	for _, sensitivePermission := range config.SensitivePermissions {
-		bar.Add(1)
-		time.Sleep(10 * time.Millisecond) // Small delay to prevent flickering
-		
 		// Skip if identity is in exceptions
-		if isException(sensitivePermission, identity) {
+		if isIdentityExcepted(identity, sensitivePermission.Exceptions) {
 			continue
 		}
-		
-		// Check if identity has any of the sensitive permissions
+
+		// Check if identity has matching permissions
 		if hasMatchingPermissions(identity.Permissions, sensitivePermission) {
+			// Determine the scope based on the binding type and permissions
+			scope := determineScope(identity.Permissions, sensitivePermission)
+			
 			violations = append(violations, Violation{
 				Identity: identity,
 				Rule:     sensitivePermission.Name,
 				Impact:   sensitivePermission.Impact,
-				Scope:    identity.Scope,
+				Scope:    scope,
 			})
 		}
 	}
-	
-	fmt.Print("\033[K") // Clear the line
 	return violations
+}
+
+// Add this function to determine the correct scope
+func determineScope(identityPerms []IdentityPermission, sensitivePermission Permission) string {
+	// Default to namespace scope
+	scope := "namespace"
+	
+	for _, identityPerm := range identityPerms {
+		// Check if this is a cluster-wide permission
+		if identityPerm.ClusterWide {
+			// If we find any cluster-wide permission that matches, mark it as cluster-wide
+			if hasOverlap(identityPerm.Resources, sensitivePermission.Resources) &&
+			   hasOverlap(identityPerm.Verbs, sensitivePermission.Verbs) &&
+			   hasOverlap(identityPerm.APIGroups, sensitivePermission.APIGroups) {
+				scope = "cluster-wide"
+				break
+			}
+		}
+	}
+	
+	return scope
 }
 
 func isException(permission Permission, identity Identity) bool {
@@ -759,5 +757,34 @@ func shouldIncludeIdentity(identity Identity) bool {
 		}
 	}
 	return true
+}
+
+// Add the missing isIdentityExcepted function
+func isIdentityExcepted(identity Identity, exceptions struct {
+	Users           []string `yaml:"users"`
+	ServiceAccounts []string `yaml:"serviceAccounts"`
+	Groups          []string `yaml:"groups"`
+}) bool {
+	switch identity.Type {
+	case "user":
+		return contains(exceptions.Users, identity.Name)
+	case "serviceAccount":
+		// For service accounts, check with namespace prefix
+		saName := fmt.Sprintf("%s:%s", identity.Namespace, identity.Name)
+		return contains(exceptions.ServiceAccounts, saName)
+	case "group":
+		return contains(exceptions.Groups, identity.Name)
+	default:
+		return false
+	}
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }
 
