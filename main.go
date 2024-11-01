@@ -16,6 +16,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	openshiftclientset "github.com/openshift/client-go/user/clientset/versioned"
 	"github.com/schollz/progressbar/v3"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // Structs for YAML configuration
@@ -215,8 +216,8 @@ func GetClusterIdentities(k8sClient *kubernetes.Clientset, ocClient *openshiftcl
 	
 	fmt.Println("\n🔍 Scanning cluster identities...")
 	
-	// Get Users and Groups only if we're on OpenShift
-	if isOpenShift && ocClient != nil {
+	// Get Users and Groups only if we're on OpenShift and they're requested
+	if isOpenShift && ocClient != nil && (checkUsers || checkAll) {
 		// Get OpenShift Users
 		users, err := ocClient.UserV1().Users().List(ctx, metav1.ListOptions{})
 		if err != nil {
@@ -259,7 +260,9 @@ func GetClusterIdentities(k8sClient *kubernetes.Clientset, ocClient *openshiftcl
 			}
 			fmt.Println() // New line after progress bar
 		}
+	}
 
+	if isOpenShift && ocClient != nil && (checkGroups || checkAll) {
 		// Get OpenShift Groups
 		groups, err := ocClient.UserV1().Groups().List(ctx, metav1.ListOptions{})
 		if err != nil {
@@ -304,48 +307,50 @@ func GetClusterIdentities(k8sClient *kubernetes.Clientset, ocClient *openshiftcl
 		}
 	}
 
-	// Get Service Accounts
-	sas, err := k8sClient.CoreV1().ServiceAccounts("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("error listing service accounts: %v", err)
-	}
-	
-	bar := progressbar.NewOptions(len(sas.Items),
-		progressbar.OptionSetDescription("Processing Service Accounts"),
-		progressbar.OptionSetTheme(progressbar.Theme{
-			Saucer:        "=",
-			SaucerHead:    ">",
-			SaucerPadding: " ",
-			BarStart:      "[",
-			BarEnd:        "]",
-		}),
-		progressbar.OptionSetWidth(40),
-		progressbar.OptionClearOnFinish(),
-		progressbar.OptionSetRenderBlankState(true),
-		progressbar.OptionEnableColorCodes(true),
-		progressbar.OptionShowCount(),
-		progressbar.OptionSetPredictTime(false),
-		progressbar.OptionFullWidth(),
-	)
-	
-	for _, sa := range sas.Items {
-		bar.Add(1)
-		identity := Identity{
-			Name:      sa.Name,
-			Type:      "serviceAccount",
-			Namespace: sa.Namespace,
-			Scope:     "namespace",
+	// Get Service Accounts only if requested
+	if checkServiceAccounts || checkAll {
+		sas, err := k8sClient.CoreV1().ServiceAccounts("").List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("error listing service accounts: %v", err)
 		}
 		
-		perms, err := getIdentityPermissions(k8sClient, identity)
-		if err != nil {
-			log.Printf("Warning: Could not fetch permissions for service account %s: %v", sa.Name, err)
-			continue
+		bar := progressbar.NewOptions(len(sas.Items),
+			progressbar.OptionSetDescription("Processing Service Accounts"),
+			progressbar.OptionSetTheme(progressbar.Theme{
+				Saucer:        "=",
+				SaucerHead:    ">",
+				SaucerPadding: " ",
+				BarStart:      "[",
+				BarEnd:        "]",
+			}),
+			progressbar.OptionSetWidth(40),
+			progressbar.OptionClearOnFinish(),
+			progressbar.OptionSetRenderBlankState(true),
+			progressbar.OptionEnableColorCodes(true),
+			progressbar.OptionShowCount(),
+			progressbar.OptionSetPredictTime(false),
+			progressbar.OptionFullWidth(),
+		)
+		
+		for _, sa := range sas.Items {
+			bar.Add(1)
+			identity := Identity{
+				Name:      sa.Name,
+				Type:      "serviceAccount",
+				Namespace: sa.Namespace,
+				Scope:     "namespace",
+			}
+			
+			perms, err := getIdentityPermissions(k8sClient, identity)
+			if err != nil {
+				log.Printf("Warning: Could not fetch permissions for service account %s: %v", sa.Name, err)
+				continue
+			}
+			identity.Permissions = perms
+			identities = append(identities, identity)
 		}
-		identity.Permissions = perms
-		identities = append(identities, identity)
+		fmt.Println() // New line after progress bar
 	}
-	fmt.Println() // New line after progress bar
 	
 	return identities, nil
 }
@@ -385,10 +390,14 @@ func getIdentityPermissions(clientset *kubernetes.Clientset, identity Identity) 
 				
 				perms, err := getRolePermissionsWithCache(clientset, rb.RoleRef, rb.Namespace, roleCache, clusterRoleCache)
 				if err != nil {
-					log.Printf("Warning: Could not fetch permissions for %s: %v", rb.Name, err)
+					if !k8serrors.IsNotFound(err) {
+						log.Printf("Warning: Error fetching permissions for %s: %v", rb.Name, err)
+					}
 					return
 				}
-				permChan <- perms
+				if len(perms) > 0 {
+					permChan <- perms
+				}
 			}(rb)
 		}
 	}
@@ -404,10 +413,14 @@ func getIdentityPermissions(clientset *kubernetes.Clientset, identity Identity) 
 				
 				perms, err := getRolePermissionsWithCache(clientset, crb.RoleRef, "", roleCache, clusterRoleCache)
 				if err != nil {
-					log.Printf("Warning: Could not fetch permissions for %s: %v", crb.Name, err)
+					if !k8serrors.IsNotFound(err) {
+						log.Printf("Warning: Error fetching permissions for %s: %v", crb.Name, err)
+					}
 					return
 				}
-				permChan <- perms
+				if len(perms) > 0 {
+					permChan <- perms
+				}
 			}(crb)
 		}
 	}
@@ -446,6 +459,10 @@ func getRolePermissionsWithCache(
 		
 		role, err := clientset.RbacV1().ClusterRoles().Get(ctx, roleRef.Name, metav1.GetOptions{})
 		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				// Skip if role doesn't exist
+				return nil, nil
+			}
 			return nil, err
 		}
 		
@@ -461,6 +478,10 @@ func getRolePermissionsWithCache(
 		
 		role, err := clientset.RbacV1().Roles(namespace).Get(ctx, roleRef.Name, metav1.GetOptions{})
 		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				// Skip if role doesn't exist
+				return nil, nil
+			}
 			return nil, err
 		}
 		
@@ -810,19 +831,19 @@ func isIdentityInBinding(identity Identity, subjects []rbacv1.Subject) bool {
 
 // Add this helper function
 func shouldIncludeIdentity(identity Identity) bool {
-	if checkAll {
-		return true
+	// If no specific type is selected and -all is not set, use the explicitly set flags
+	if !checkAll {
+		switch identity.Type {
+		case "user":
+			return checkUsers
+		case "group":
+			return checkGroups
+		case "serviceAccount":
+			return checkServiceAccounts
+		default:
+			return false
+		}
 	}
-
-	switch identity.Type {
-	case "user":
-		return checkUsers
-	case "group":
-		return checkGroups
-	case "serviceAccount":
-		return checkServiceAccounts
-	default:
-		return false
-	}
+	return true
 }
 
