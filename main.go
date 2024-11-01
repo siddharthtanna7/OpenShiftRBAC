@@ -9,6 +9,7 @@ import (
 	"flag"
 	"sync"
 	"strings"
+	"sort"
 
 	"gopkg.in/yaml.v2"
 	"k8s.io/client-go/kubernetes"
@@ -67,6 +68,7 @@ type ConsolidatedViolation struct {
     Namespace   string   // for serviceAccounts
     Violations  []string
     Impacts     map[string]string  // maps violation name to impact
+    Scope       string
 }
 
 // Add these global variables
@@ -603,12 +605,11 @@ func hasOverlap(a, b []string) bool {
 }
 
 func OutputViolations(violations []Violation) {
-	// Map to store consolidated violations by identity
+	// Single map for all violations
 	consolidatedViolations := make(map[string]*ConsolidatedViolation)
 
-	// Consolidate violations by identity
+	// Consolidate violations
 	for _, v := range violations {
-		// Create key based on identity type
 		var key string
 		if v.Identity.Type == "serviceAccount" {
 			key = fmt.Sprintf("%s:%s", v.Identity.Namespace, v.Identity.Name)
@@ -623,28 +624,24 @@ func OutputViolations(violations []Violation) {
 				Namespace: v.Identity.Namespace,
 				Violations: make([]string, 0),
 				Impacts:   make(map[string]string),
+				Scope:     v.Scope,
 			}
 		}
-
-		// Add violation if not already present
-		if !contains(consolidatedViolations[key].Violations, v.Rule) {
-			consolidatedViolations[key].Violations = append(consolidatedViolations[key].Violations, v.Rule)
-			consolidatedViolations[key].Impacts[v.Rule] = v.Impact
-		}
+		addViolation(consolidatedViolations[key], v)
 	}
 
-	// Print consolidated violations
-	fmt.Println("\n🔍 Security Violations Report")
-	fmt.Println("============================")
+	// Print Report
+	fmt.Println("\nSECURITY VIOLATIONS REPORT")
+	fmt.Println("==========================")
 
-	// Print by identity type
-	printIdentityTypeViolations(consolidatedViolations, "user", "Users")
-	printIdentityTypeViolations(consolidatedViolations, "group", "Groups")
-	printIdentityTypeViolations(consolidatedViolations, "serviceAccount", "Service Accounts")
+	printViolationsByType(consolidatedViolations, "user", "Users")
+	printViolationsByType(consolidatedViolations, "group", "Groups")
+	printViolationsByType(consolidatedViolations, "serviceAccount", "Service Accounts")
+
+	printSummary(consolidatedViolations)
 }
 
-func printIdentityTypeViolations(violations map[string]*ConsolidatedViolation, identityType, header string) {
-	// Collect violations for this type
+func printViolationsByType(violations map[string]*ConsolidatedViolation, identityType, header string) {
 	typeViolations := make([]*ConsolidatedViolation, 0)
 	for _, v := range violations {
 		if v.Type == identityType {
@@ -652,93 +649,75 @@ func printIdentityTypeViolations(violations map[string]*ConsolidatedViolation, i
 		}
 	}
 
-	// Only print section if there are violations
+	// Sort identities for consistent output
+	sort.Slice(typeViolations, func(i, j int) bool {
+		return typeViolations[i].Identity < typeViolations[j].Identity
+	})
+
 	if len(typeViolations) > 0 {
-		fmt.Printf("\n📋 %s\n", header)
-		fmt.Println(strings.Repeat("-", len(header)+3))
+		fmt.Printf("\n%s\n", header)
+		fmt.Println(strings.Repeat("-", len(header)))
 
 		for _, v := range typeViolations {
 			if len(v.Violations) > 0 {
-				switch identityType {
-				case "serviceAccount":
-					fmt.Printf("\n🔑 ServiceAccount: %s (Namespace: %s)\n", v.Identity, v.Namespace)
-				case "user":
-					fmt.Printf("\n👤 User: %s\n", v.Identity)
-				case "group":
-					fmt.Printf("\n👥 Group: %s\n", v.Identity)
-				}
+				fmt.Printf("\n%s: %s\n", identityType, v.Identity)
 				
 				fmt.Println("Violations:")
+				sort.Strings(v.Violations)
 				for _, violation := range v.Violations {
-					fmt.Printf("  • %s\n", violation)
+					fmt.Printf("  * %s\n", violation)
 					fmt.Printf("    Impact: %s\n", v.Impacts[violation])
+					if v.Scope == "namespace" {
+						fmt.Printf("    Namespace: %s\n", v.Namespace)
+					}
 				}
 			}
 		}
 	}
 }
 
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
+func addViolation(cv *ConsolidatedViolation, v Violation) {
+	cv.Violations = append(cv.Violations, v.Rule)
+	cv.Impacts[v.Rule] = v.Impact
+	if v.Scope == "namespace" {
+		cv.Namespace = v.Identity.Namespace
 	}
-	return false
-}
-
-// Helper function to check if an identity is already in a slice
-func containsIdentity(identities []Identity, identity Identity) bool {
-	for _, i := range identities {
-		if i.Name == identity.Name && i.Type == identity.Type && i.Namespace == identity.Namespace {
-			return true
-		}
-	}
-	return false
 }
 
 // Modified summary function
-func printSummary(clusterViolations map[string]map[string]map[string]*ConsolidatedViolation, namespaceViolations map[string]map[string]map[string]*ConsolidatedViolation) {
-	fmt.Println("\n📊 Summary:")
-	fmt.Println("=========")
+func printSummary(violations map[string]*ConsolidatedViolation) {
+	fmt.Println("\nSUMMARY")
+	fmt.Println("-------")
 	
-	// Count unique violations and identities
-	clusterViolationCount := len(clusterViolations)
-	namespacesAffected := len(namespaceViolations)
-	
-	var totalIdentities int
+	// Count identities by type
 	identityTypes := make(map[string]int)
+	clusterWideCount := 0
+	namespaceCount := 0
 	
-	// Count cluster-wide identities
-	for _, typeMap := range clusterViolations {
-		for idType, identities := range typeMap {
-			identityTypes[idType] += len(identities)
-			totalIdentities += len(identities)
-		}
-	}
-	
-	// Count namespace-scoped identities
-	for _, typeMap := range namespaceViolations {
-		for idType, identities := range typeMap {
-			identityTypes[idType] += len(identities)
-			totalIdentities += len(identities)
+	// Count violations by scope and identity type
+	for _, v := range violations {
+		identityTypes[v.Type]++
+		if v.Scope == "cluster-wide" {
+			clusterWideCount++
+		} else {
+			namespaceCount++
 		}
 	}
 	
 	fmt.Printf("\nTotal Violations Found:\n")
-	fmt.Printf("- Cluster-wide violation types: %d\n", clusterViolationCount)
-	fmt.Printf("- Namespaces affected: %d\n", namespacesAffected)
-	fmt.Printf("- Total identities affected: %d\n", totalIdentities)
+	fmt.Printf("- Cluster-wide violations: %d\n", clusterWideCount)
+	fmt.Printf("- Namespace-scoped violations: %d\n", namespaceCount)
+	fmt.Printf("- Total identities affected: %d\n", len(violations))
 	
 	fmt.Printf("\nBreakdown by Identity Type:\n")
 	if count := identityTypes["user"]; count > 0 {
-		fmt.Printf("- 👤 Users: %d\n", count)
+		fmt.Printf("- Users: %d\n", count)
 	}
 	if count := identityTypes["group"]; count > 0 {
-		fmt.Printf("- 👥 Groups: %d\n", count)
+		fmt.Printf("- Groups: %d\n", count)
 	}
 	if count := identityTypes["serviceAccount"]; count > 0 {
-		fmt.Printf("- 🔧 Service Accounts: %d\n", count)
+		fmt.Printf("- Service Accounts: %d\n", count)
 	}
 }
 
